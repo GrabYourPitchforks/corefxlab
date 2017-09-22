@@ -131,14 +131,14 @@ namespace System.Text.Primitives.System.Text.Encoders
         /// Returns true iff the specified code point is a UTF16 surrogate.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool IsSurrogate(int codePoint)
+        public static bool IsSurrogate(int codePoint)
         {
             Debug.Assert(0 <= codePoint && codePoint <= 0x10FFFF);
 
             // See http://www.unicode.org/versions/Unicode10.0.0/ch03.pdf, Sec. 3.8.
             // Surrogates are in the range U+D800..U+DFFF, so we can perform a simple
             // bit mask check to see if the requested code point is within this range.
-            return ((codePoint & 0b1111_1111_1111_1000_0000_0000) == 0b1101_1000_0000_0000);
+            return ((codePoint & ~0b0111_1111_1111) == 0b1101_1000_0000_0000);
         }
 
         /// <summary>
