@@ -41,6 +41,9 @@ namespace System.Text
             _data = new byte[length + 1]; // zero-inited; array ctor will check for overflow
         }
 
+        // ctor from null-terminated UTF-8 binary data
+        public Utf8String(byte* value) => throw null;
+
         public Utf8String(ReadOnlySpan<byte> value) => throw null;
 
         public Utf8String(ReadOnlySpan<char> value) => throw null;
