@@ -7,7 +7,7 @@ using System.Collections.Generic;
 
 namespace System.Text
 {
-    public static class Utf8Extensions
+    public static partial class Utf8Extensions
     {
         // TODO: These should really be extension properties, not extension methods.
 
