@@ -57,13 +57,7 @@ namespace System.Text
         // ROM<T>-based overload of above. Will return original input or allocate new buffer.
         public static ReadOnlyMemory<Char8> ConvertToValidUtf8(ReadOnlyMemory<Char8> input) => throw null;
     }
-
-    public enum InvalidSequenceBehavior
-    {
-        ReplaceInvalidSequence, // replace invalid sequences with U+FFFD
-        Fail, // don't repalce invalid sequences; report failure instead
-    }
-
+    
     // Contains helper methods for inspecting UTF-8 data.
     // Alternative naming: class Utf8Inspection in namespace System.Text.Utf8
     public static partial class Utf8_
