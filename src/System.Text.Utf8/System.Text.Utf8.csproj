@@ -9,7 +9,8 @@
     <PackageIconUrl>http://go.microsoft.com/fwlink/?linkid=833199</PackageIconUrl>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="4.5.0-preview3-26405-01" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="4.6.0-preview1-26708-04" />
+    <PackageReference Include="System.Runtime.Intrinsics.Experimental" Version="4.6.0-preview1-26708-04" />
   </ItemGroup>
   <ItemGroup>
     <Compile Update="Resources\Strings.Designer.cs">

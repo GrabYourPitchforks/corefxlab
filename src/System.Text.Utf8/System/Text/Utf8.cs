@@ -3,137 +3,131 @@
 // See the LICENSE file in the project root for more information.
 
 using System.Buffers;
-
-using Char8 = System.Text.Utf8Char;
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace System.Text
 {
-    // Contains helper methods for performing UTF-8 data conversion.
-    // Alternative naming: class Utf8Convert in namespace System.Text.Utf8
     public static partial class Utf8_
     {
-        // Converts UTF8 -> UTF16.
-        // Similar to Utf8Encoder.Convert, but uses OperationStatus-style APIs.
-        public static OperationStatus ConvertToUtf16(
-            ReadOnlySpan<Char8> input,
-            Span<char> output,
-            out int elementsConsumed,
-            out int elementsWritten,
-            InvalidSequenceBehavior replacementBehavior = InvalidSequenceBehavior.ReplaceInvalidSequence,
-            bool isFinalChunk = true) => throw null;
+        private const int ArbitraryStackLimit = 512;
 
-        // Converts UTF16 -> UTF8.
-        // Similar to Utf8Encoder.Convert, but uses OperationStatus-style APIs.
-        public static OperationStatus ConvertFromUtf16(
-            ReadOnlySpan<char> input,
-            Span<Char8> output,
-            out int elementsConsumed,
-            out int elementsWritten,
-            InvalidSequenceBehavior replacementBehavior = InvalidSequenceBehavior.ReplaceInvalidSequence,
-            bool isFinalChunk = true) => throw null;
+        /// <summary>
+        /// Returns a hash code for the given UTF-8 string using the specified <see cref="StringComparison"/>.
+        /// </summary>
+        public static int GetHashCode(
+            ReadOnlySpan<byte> utf8Input,
+            StringComparison comparisonType)
+        {
+            switch (comparisonType)
+            {
+                case StringComparison.CurrentCulture:
+                    return GetHashCode(utf8Input, CultureInfo.CurrentCulture, ignoreCase: false);
+                case StringComparison.CurrentCultureIgnoreCase:
+                    return GetHashCode(utf8Input, CultureInfo.InvariantCulture, ignoreCase: true);
+                case StringComparison.InvariantCulture:
+                    return GetHashCode(utf8Input, CultureInfo.InvariantCulture, ignoreCase: false);
+                case StringComparison.InvariantCultureIgnoreCase:
+                    return GetHashCode(utf8Input, CultureInfo.InvariantCulture, ignoreCase: true);
+                case StringComparison.Ordinal:
+                    return Marvin.ComputeHash32(utf8Input, Marvin.Utf8StringSeed);
+                case StringComparison.OrdinalIgnoreCase:
+                    return GetHashCodeOrdinalIgnoreCase(utf8Input);
+            }
 
-        // Converts UTF8 -> UTF8, fixing up invalid sequences along the way.
-        // (This will never return InvalidData.)
-        public static OperationStatus ConvertToValidUtf8(
-            ReadOnlySpan<Char8> input,
-            Span<Char8> output,
-            out int elementsConsumed,
-            out int elementsWritten,
-            bool isFinalChunk = true) => throw null;
+            // TODO: Fix exception message below.
+            throw new Exception("Bad comparison type.");
+        }
 
-        // Same as above, but input buffer has T=byte
-        public static OperationStatus ConvertToValidUtf8(
-            ReadOnlySpan<byte> input,
-            Span<Char8> output,
-            out int elementsConsumed,
-            out int elementsWritten,
-            bool isFinalChunk = true) => throw null;
+        private static int GetHashCodeOrdinalIgnoreCase(ReadOnlySpan<byte> utf8Input)
+        {
+            // Just like String.GetHashCode(StringComparison.OrdinalIgnoreCase),
+            // we'll be implemented as the hash code over the upper invariant form of the
+            // input string.
 
-        // If the input is valid UTF-8, returns the input as-is.
-        // If the input is not valid UTF-8, replaces invalid sequences and returns
-        // a Utf8String which is well-formed UTF-8.
-        public static Utf8String ConvertToValidUtf8(Utf8String input) => throw null;
+            StreamingMarvin marvin = StreamingMarvin.CreateForUtf8();
 
-        // ROM<T>-based overload of above. Will return original input or allocate new buffer.
-        public static ReadOnlyMemory<Char8> ConvertToValidUtf8(ReadOnlyMemory<Char8> input) => throw null;
-    }
-    
-    // Contains helper methods for inspecting UTF-8 data.
-    // Alternative naming: class Utf8Inspection in namespace System.Text.Utf8
-    public static partial class Utf8_
-    {
-        // Allows forward enumeration over scalars.
-        // TODO: Should we also allow reverse enumeration? GetScalarsReverse?
-        public static Utf8SpanUnicodeScalarEnumerator GetScalars(ReadOnlySpan<byte> utf8Text) => throw null;
-        public static Utf8SpanUnicodeScalarEnumerator GetScalars(ReadOnlySpan<Char8> utf8Text) => throw null;
+            if (!utf8Input.IsEmpty)
+            {
+                // TODO: Provide a more optimized implementation using vector acceleration
+                // and avoiding the transcoding step for the common case of ASCII input data.
 
-        // Returns true iff the input consists only of well-formed UTF-8 sequences.
-        // This is O(n).
-        public static bool IsWellFormedUtf8Sequence(ReadOnlySpan<byte> utf8Text) => throw null;
-        public static bool IsWellFormedUtf8Sequence(ReadOnlySpan<Char8> utf8Text) => throw null;
+                Span<char> utf16Buffer = stackalloc char[ArbitraryStackLimit];
 
-        // Returns true iff the Utf8String consists only of well-formed UTF-8 sequences.
-        // This will almost always be O(1) but may be O(n) in weird edge cases.
-        public static bool IsWellFormedUtf8String(Utf8String utf8String) => throw null;
+                do
+                {
+                    // We cannot pass InvalidSequenceBehavior.LeaveUnchanged to the transcoder because
+                    // we are by definition changing the representation of the underlying data. Instead
+                    // we fudge things by telling the transcoder to fail in the face of invalid data,
+                    // allowing us to copy invalid data from the input buffer to the output buffer manually.
+                    // This only works because our transcoding routine is contracted to return the input
+                    // buffer index where the first invalid sequence was seen, so this trick is not generalizable.
 
-        // Returns the first scalar in the sequence along with the sequence length consumed.
-        // SequenceValidity's members have different semantic meaning from OperationStatus.
-        // TODO: Should we have UTF-16 equivalents of these? Could be useful.
-        public static SequenceValidity PeekFirstScalar(
-            ReadOnlySpan<byte> utf8Text,
-            out UnicodeScalar scalar,
-            out int sequenceLength) => throw null;
-        public static SequenceValidity PeekFirstScalar(
-            ReadOnlySpan<Char8> utf8Text,
-            out UnicodeScalar scalar,
-            out int sequenceLength) => throw null;
+                    OperationStatus operationStatus = TranscodeToUtf16(
+                        utf8Input: utf8Input,
+                        utf16Output: utf16Buffer,
+                        bytesConsumed: out int bytesConsumed,
+                        charsWritten: out int charsWritten,
+                        isFinalBlock: true /* hash code is over entire buffer */,
+                        invalidSequenceBehavior: InvalidSequenceBehavior.Fail);
 
-        // Similar to PeekFirstScalar, but reads from the end.
-        public static SequenceValidity PeekLastScalar(
-            ReadOnlySpan<byte> utf8Text,
-            out UnicodeScalar scalar,
-            out int sequenceLength) => throw null;
-        public static SequenceValidity PeekLastScalar(
-            ReadOnlySpan<Char8> utf8Text,
-            out UnicodeScalar scalar,
-            out int sequenceLength) => throw null;
+                    // Uppercase UTF-16 in-place. Per ftp://ftp.unicode.org/Public/UNIDATA/CaseFolding.txt
+                    // and http://www.unicode.org/charts/case/, "simple" case folding (as performed by these
+                    // invariant case conversion routines) will never change the length of a UTF-16 string.
+                    // This also means we don't have to worry about individual code points crossing planes.
+                    // The UTF-16 ToUpperInvariant routine is documented as supporting in-place conversion.
 
-        // Given UTF-8 input text, returns the number of UTF-16 characters and the
-        // number of scalars present. Returns false iff the input sequence is invalid
-        // and the invalid sequence behavior is to fail.
-        public static bool TryGetUtf16CharCount(
-            ReadOnlySpan<Char8> utf8Text,
-            out int utf16CharCount,
-            out int scalarCount,
-            InvalidSequenceBehavior replacementBehavior = InvalidSequenceBehavior.ReplaceInvalidSequence) => throw null;
+                    var uppercaseSlice = utf16Buffer.Slice(0, ((ReadOnlySpan<char>)utf16Buffer).ToUpperInvariant(utf16Buffer));
+                    marvin.Consume(MemoryMarshal.AsBytes(uppercaseSlice));
+                    utf8Input = utf8Input.Slice(0, bytesConsumed);
 
-        // Given UTF-16 input text, returns the number of UTF-8 characters and the
-        // number of scalars present. Returns false iff the input sequence is invalid
-        // and the invalid sequence behavior is to fail *or* if the required number of
-        // UTF-8 chars does not fit into an Int32.
-        // TODO: Does that mean the 'out' type should be long?
-        public static bool TryGetUtf8CharCount(
-            ReadOnlySpan<char> utf16Text,
-            out int utf8CharCount,
-            out int scalarCount,
-            InvalidSequenceBehavior replacementBehavior = InvalidSequenceBehavior.ReplaceInvalidSequence) => throw null;
+                    Debug.Assert(operationStatus != OperationStatus.NeedMoreData, "Cannot occur if isFinalBlock = true");
 
-        // Returns the index of the first invalid UTF-8 sequence, or -1 if the input text
-        // is well-formed UTF-8. Additionally returns the number of UTF-16 chars and the
-        // number of scalars seen up until that point. (If returns -1, the two 'out' values
-        // represent the values for the entire string.)
-        public static int GetIndexOfFirstInvalidUtf8Sequence(
-            ReadOnlySpan<Char8> utf8Text,
-            out int utf16CharCount,
-            out int scalarCount) => throw null;
-    }
+                    if (operationStatus == OperationStatus.InvalidData)
+                    {
+                        var result = UnicodeReader.PeekFirstScalarUtf8(utf8Input);
+                        Debug.Assert(result.status == SequenceValidity.InvalidSequence, "InvalidData should be accompanied by an invalid sequence.");
 
-    // Allows streaming validation of input.
-    // !! MUTABLE STRUCT !!
-    public struct Utf8StreamingValidator
-    {
-        // Returns true iff all data seen up to now represents well-formed UTF-8,
-        // or false iff any data consumed so far has an invalid UTF-8 sequence.
-        public bool TryConsume(ReadOnlySpan<byte> data, bool isFinalChunk) => throw null;
+                        // Copy invalid bytes as-is to the hash routine, then continue. The reason we do this
+                        // is that we don't ever want two distinct invalid UTF-8 strings to compare as equal,
+                        // which means that we also want their hash codes to be distinct, ensured by mixing
+                        // the invalid bytes directly into the hash code. A naive hash code implementation
+                        // where invalid sequences are replaced with U+FFFD could lead to a bunch of inequal
+                        // strings all having the same hash code, which could subject the application to a
+                        // denial of service attack.
+
+                        // We also need a way to distinguish invalid UTF-8 bytes from valid UTF-16 code units,
+                        // otherwise the underlying hash code can't tell the difference between [ D8 D8 DF DF ]
+                        // (which is invalid UTF-8) and [ F1 86 8F 9F ] (which is U+463DF, whose UTF-16 representation
+                        // is [ D8D8 DFDF ]), which allows trivial collisions. We can address this by using
+                        // [ DD DD ] as a sentinel to indicate that the next several bytes are bad UTF-8, not
+                        // good UTF-16. Since [ DD DD ] can never appear unless immediately after a high surrogate,
+                        // this effectively disambiguates the two cases. We'll also include the length of the invalid
+                        // sequence as an additional discriminator to help differentiate between [ F3 80 80 ] (an
+                        // 3-byte invalid UTF-8 sequence) and [ F3 E8 82 80 ] (a 1-byte invalid UTF-8 sequence followed
+                        // by a 3-byte valid UTF-8 sequence corresponding to UTF-16 [ 8080 ]).
+
+                        Debug.Assert(result.charsConsumed >= 1 && result.charsConsumed <= 3, "Expected 1 - 3 bytes consumed.");
+
+                        uint sentinel = (uint)(result.charsConsumed + 0xDDDD0000);
+                        marvin.Consume(MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref sentinel, 1)));
+                        marvin.Consume(utf8Input.Slice(0, result.charsConsumed));
+                        utf8Input = utf8Input.Slice(result.charsConsumed);
+                    }
+                } while (!utf8Input.IsEmpty);
+            }
+
+            return marvin.Finish();
+        }
+
+        /// <summary>
+        /// Returns a culture-aware hash code for the given UTF-8 string using the specified <see cref="CultureInfo"/>
+        /// and case sensitivity settings.
+        /// </summary>
+        public static int GetHashCode(
+            ReadOnlySpan<byte> utf8Input,
+            CultureInfo cultureInfo,
+            bool ignoreCase) => throw null;
     }
 }
