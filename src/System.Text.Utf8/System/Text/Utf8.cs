@@ -5,6 +5,8 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Globalization;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace System.Text
@@ -48,10 +50,47 @@ namespace System.Text
 
             StreamingMarvin marvin = StreamingMarvin.CreateForUtf8();
 
+            // First try the common case of all-ASCII input data, which can be optimized
+            // through vectorization.
+
+            if (Vector.IsHardwareAccelerated)
+            {
+                if (utf8Input.Length >= Vector<byte>.Count)
+                {
+                    Vector<byte> asciiMask = new Vector<byte>(0x80);
+                    Vector<byte> lowercaseA = new Vector<byte>((byte)'a');
+                    Vector<byte> lowercaseZ = new Vector<byte>((byte)'z');
+                    Vector<byte> changeCaseMask = new Vector<byte>(0x20);
+
+                    do
+                    {
+                        // TODO: Remove unsafe code below when necessary Vector APIs come online
+
+                        var candidate = Unsafe.ReadUnaligned<Vector<byte>>(ref MemoryMarshal.GetReference(utf8Input));
+                        if ((candidate & asciiMask) != Vector<byte>.Zero)
+                        {
+                            break; // non-ASCII data incoming
+                        }
+
+                        // Change [a-z] to [A-Z], leaving all other bytes the same.
+                        candidate ^= Vector.LessThanOrEqual(candidate - lowercaseA, lowercaseZ) & changeCaseMask;
+                        marvin.Consume(candidate);
+                        utf8Input = utf8Input.Slice(Vector<byte>.Count);
+                    } while (utf8Input.Length >= Vector<byte>.Count);
+                }
+
+                // Emit a sentinel value indicating that we're switching from vectorized to non-vectorized
+                // operation. This is helpful because it allows us to distinguish [ 58 58 ] (a valid 2-byte UTF-8
+                // sequence) from [ E5 A1 98 ] (a valid 3-byte UTF-8 sequence which represents the UTF-16
+                // sequence [ 5858 ]). See the comments in the main loop below for why it's important to
+                // distinguish between these two scenarios.
+
+                marvin.Consume(0xFF00FF00U);
+            }
+
             if (!utf8Input.IsEmpty)
             {
-                // TODO: Provide a more optimized implementation using vector acceleration
-                // and avoiding the transcoding step for the common case of ASCII input data.
+                // The remainder is implemented by transcoding UTF-8 -> UTF-16.
 
                 Span<char> utf16Buffer = stackalloc char[ArbitraryStackLimit];
 
@@ -110,8 +149,7 @@ namespace System.Text
 
                         Debug.Assert(result.charsConsumed >= 1 && result.charsConsumed <= 3, "Expected 1 - 3 bytes consumed.");
 
-                        uint sentinel = (uint)(result.charsConsumed + 0xDDDD0000);
-                        marvin.Consume(MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref sentinel, 1)));
+                        marvin.Consume((uint)(result.charsConsumed + 0xDDDD0000));
                         marvin.Consume(utf8Input.Slice(0, result.charsConsumed));
                         utf8Input = utf8Input.Slice(result.charsConsumed);
                     }

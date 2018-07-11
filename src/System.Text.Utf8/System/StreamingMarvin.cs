@@ -19,6 +19,8 @@ namespace System
     {
         public static StreamingMarvin CreateForUtf8() => throw null;
 
+        public void Consume<T>(in T value) where T : struct => throw null;
+
         public void Consume(ReadOnlySpan<byte> contents) => throw null;
 
         public int Finish() => throw null;
