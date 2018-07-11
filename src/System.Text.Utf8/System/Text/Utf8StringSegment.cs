@@ -171,7 +171,7 @@ namespace System.Text
 
         public Enumerator GetEnumerator() => throw null;
 
-        public override int GetHashCode() => Marvin.ComputeHash32((_count != 0) ? _value.Bytes.Slice(_offset, _count) : ReadOnlySpan<byte>.Empty, Marvin.Utf8StringSeed);
+        public override int GetHashCode() => Marvin.ComputeHash32((_count != 0) ? _value.Bytes.Slice(_offset, _count) : ReadOnlySpan<byte>.Empty, Marvin.DefaultSeed);
 
         [EditorBrowsable(EditorBrowsableState.Never)]
         public void GetUtf8String(out Utf8String value, out int startIndex, out int length)

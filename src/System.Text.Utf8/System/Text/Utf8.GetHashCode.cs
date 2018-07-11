@@ -31,7 +31,7 @@ namespace System.Text
                 case StringComparison.InvariantCultureIgnoreCase:
                     return GetHashCode(utf8Input, CultureInfo.InvariantCulture, ignoreCase: true);
                 case StringComparison.Ordinal:
-                    return Marvin.ComputeHash32(utf8Input, Marvin.Utf8StringSeed);
+                    return Marvin.ComputeHash32(utf8Input, Marvin.DefaultSeed);
                 case StringComparison.OrdinalIgnoreCase:
                     return GetHashCodeOrdinalIgnoreCase(utf8Input);
             }
@@ -40,13 +40,51 @@ namespace System.Text
             throw new Exception("Bad comparison type.");
         }
 
+        /// <summary>
+        /// Returns a culture-aware hash code for the given UTF-8 string using the specified <see cref="CultureInfo"/>
+        /// and case sensitivity settings.
+        /// </summary>
+        public static int GetHashCode(
+            ReadOnlySpan<byte> utf8Input,
+            CultureInfo cultureInfo,
+            bool ignoreCase)
+        {
+            if (cultureInfo == null)
+            {
+                throw new ArgumentNullException(nameof(cultureInfo));
+            }
+
+            // If the hash code computation is culture-aware, we pessimistically fall back to UTF-16
+            // transcoding without trying to perform vectorized UTF-8 operations. This is because
+            // the culture being specified might consume multiple scalars at a time in ways that we
+            // cannot predict.
+
+            char[] rentedChars = null;
+            Span<char> tempBuffer = (utf8Input.Length > ArbitraryStackLimit)
+                ? (rentedChars = ArrayPool<char>.Shared.Rent(utf8Input.Length))
+                : stackalloc char[ArbitraryStackLimit];
+
+            // See comments in GetHashCodeOrdinalIgnoreCase for why we propagate malformed sequences
+            // rather than replacing them with U+FFFD.
+
+            int utf16Length = TranscodeToUtf16PropagateMalformedSequences(utf8Input, tempBuffer);
+            int hashCode = Utf16_.GetHashCode(tempBuffer.Slice(0, utf16Length), cultureInfo, ignoreCase);
+
+            if (rentedChars != null)
+            {
+                ArrayPool<char>.Shared.Return(rentedChars);
+            }
+
+            return hashCode;
+        }
+
         private static int GetHashCodeOrdinalIgnoreCase(ReadOnlySpan<byte> utf8Input)
         {
             // Just like String.GetHashCode(StringComparison.OrdinalIgnoreCase),
             // we'll be implemented as the hash code over the upper invariant form of the
             // input string.
 
-            StreamingMarvin marvin = StreamingMarvin.CreateForUtf8();
+            StreamingMarvin marvin = StreamingMarvin.Create();
 
             // First, try converting as many ASCII bytes as we can without involving transcoding.
 
@@ -57,8 +95,8 @@ namespace System.Text
                     ? (rentedBytes = ArrayPool<byte>.Shared.Rent(utf8Input.Length))
                     : stackalloc byte[ArbitraryStackLimit];
 
-                int numBytesCopied = ChangeCaseAscii(utf8Input, rentedBytes, toUpper: true);
-                marvin.Consume(rentedBytes.AsSpan(0, numBytesCopied));
+                int numBytesCopied = ChangeCaseAscii(utf8Input, tempBuffer, toUpper: true);
+                marvin.Consume(tempBuffer.Slice(0, numBytesCopied));
                 utf8Input = utf8Input.Slice(numBytesCopied);
 
                 if (rentedBytes != null)
@@ -126,7 +164,6 @@ namespace System.Text
 
                         var result = UnicodeReader.PeekFirstScalarUtf8(utf8Input);
                         Debug.Assert(result.status == SequenceValidity.InvalidSequence, "InvalidData should be accompanied by an invalid sequence.");
-                        Debug.Assert(result.charsConsumed >= 1 && result.charsConsumed <= 3, "Expected 1 - 3 bytes consumed.");
 
                         for (int i = 0; i < result.charsConsumed; i++)
                         {
@@ -151,14 +188,5 @@ namespace System.Text
 
             return marvin.Finish();
         }
-
-        /// <summary>
-        /// Returns a culture-aware hash code for the given UTF-8 string using the specified <see cref="CultureInfo"/>
-        /// and case sensitivity settings.
-        /// </summary>
-        public static int GetHashCode(
-            ReadOnlySpan<byte> utf8Input,
-            CultureInfo cultureInfo,
-            bool ignoreCase) => throw null;
     }
 }

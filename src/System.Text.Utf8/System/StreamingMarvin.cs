@@ -17,7 +17,7 @@ namespace System
 {
     internal struct StreamingMarvin
     {
-        public static StreamingMarvin CreateForUtf8() => throw null;
+        public static StreamingMarvin Create() => throw null;
 
         public void Consume<T>(in T value) where T : struct => throw null;
 

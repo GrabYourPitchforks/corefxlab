@@ -110,7 +110,7 @@ namespace System
             return (value << shift) | (value >> (32 - shift));
         }
 
-        public static ulong Utf8StringSeed { get; } = GenerateSeed();
+        public static ulong DefaultSeed { get; } = GenerateSeed();
 
         private static ulong GenerateSeed()
         {

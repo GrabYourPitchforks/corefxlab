@@ -472,7 +472,7 @@ namespace System.Text
 
         public Enumerator GetEnumerator() => new Enumerator(_data);
 
-        public override int GetHashCode() => Marvin.ComputeHash32(Bytes, Marvin.Utf8StringSeed);
+        public override int GetHashCode() => Marvin.ComputeHash32(Bytes, Marvin.DefaultSeed);
 
         [EditorBrowsable(EditorBrowsableState.Never)]
         public ref readonly Utf8Char GetPinnableReference()
