@@ -2,11 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using System;
-using System.Buffers;
 using System.Diagnostics;
-using System.Globalization;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -16,153 +12,138 @@ namespace System.Text
 {
     public static partial class Utf8_
     {
-        public static OperationStatus ToUpperInvariant(
-            ReadOnlySpan<byte> utf8Input,
-            Span<byte> utf8Output,
-            out int bytesConsumed,
-            out int bytesWritten,
-            bool isFinalBlock = true,
-            InvalidSequenceBehavior invalidSequenceBehavior = InvalidSequenceBehavior.ReplaceInvalidSequence) => throw null;
-        //{
-        //    // Parameter checks & default initialization
+        /// <summary>
+        /// Copies data from the input buffer to the output buffer, changing the case of any ASCII
+        /// characters encountered along the way. Terminates when a non-ASCII character is seen.
+        /// Returns the number of ASCII characters copied.
+        /// </summary>
+        /// <remarks>
+        /// Caller should ensure output buffer is at least as large as input buffer. On method return,
+        /// the contents of the output buffer beyond the return value index are undefined.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int ChangeCaseAscii(
+            ReadOnlySpan<byte> input,
+            Span<byte> output,
+            bool toUpper)
+        {
+            // Requirement: output must be large enough to hold input.
+            // (Though we'll truncate if needed so that we don't overrun the buffer.)
 
-        //    if (!UnicodeHelpers.IsInRangeInclusive((uint)invalidSequenceBehavior, (uint)InvalidSequenceBehavior.Fail, (uint)InvalidSequenceBehavior.LeaveUnchanged))
-        //    {
-        //        // TODO: Fix exception message below.
-        //        throw new Exception("Bad sequence behavior.");
-        //    }
+            Debug.Assert(output.Length >= input.Length, "Output buffer too small.");
 
-        //    bytesConsumed = 0;
-        //    bytesWritten = 0;
+            ref byte firstNonAsciiInputChar = ref ChangeCaseAsciiCore(
+                input: ref MemoryMarshal.GetReference(input),
+                output: ref MemoryMarshal.GetReference(output),
+                charCount: Math.Min(input.Length, output.Length),
+                toUpper: toUpper);
 
-        //    // Assuming common case is all-ASCII input, go as far as we can with vector acceleration.
-        //    // TODO: This can be optimized by using AVX2 instructions directly rather than generalized
-        //    // managed vector operations.
+            return (int)(nuint)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(input), ref firstNonAsciiInputChar);
+        }
 
-        //    if (Vector.IsHardwareAccelerated)
-        //    {
-        //        Vector<byte> asciiMask = new Vector<byte>(0x80);
-        //        Vector<byte> lowercaseA = new Vector<byte>((byte)'a');
-        //        Vector<byte> lowercaseZ = new Vector<byte>((byte)'z');
-        //        Vector<byte> changeCaseMask = new Vector<byte>(0x20);
+        // Returns a reference to the first non-ASCII input character (or to the element just
+        // past the end of the buffer if all input characters were ASCII).
+        private static ref byte ChangeCaseAsciiCore(
+            ref byte input,
+            ref byte output,
+            nuint charCount,
+            bool toUpper)
+        {
+            if (Avx.IsSupported && Avx2.IsSupported && Lzcnt.IsSupported && charCount >= Unsafe.SizeOf<Vector256<sbyte>>())
+            {
+                // Since we only have vpcmpgtb (signed) comparison checks, we need 'start' to be just before 'A'
+                // and 'end' to be right at 'Z'. When AVX512 support comes online we'll be able to use unsigned
+                // comparisons via the vpcmpub instruction.
 
-        //        while (utf8Input.Length >= Vector<byte>.Count && utf8Output.Length >= Vector<byte>.Count)
-        //        {
-        //            // TODO: Remove unsafe code below when necessary Vector APIs come online
+                var flipCaseMask = Avx.SetAllVector256<sbyte>(0x20);
+                var startOfAlphaRange = Avx.SetAllVector256<sbyte>('A' - 1);
+                if (toUpper)
+                {
+                    startOfAlphaRange = Avx2.Xor(startOfAlphaRange, flipCaseMask);
+                }
+                var endOfAlphaRange = Avx2.Add(startOfAlphaRange, Avx.SetAllVector256<sbyte>(26));
 
-        //            var candidate = Unsafe.ReadUnaligned<Vector<byte>>(ref MemoryMarshal.GetReference(utf8Input));
-        //            if ((candidate & asciiMask) != Vector<byte>.Zero)
-        //            {
-        //                break; // non-ASCII data incoming
-        //            }
+                ref byte lastAddrWhereCanReadVector = ref Unsafe.Add(ref Unsafe.Add(ref input, charCount), -Unsafe.SizeOf<Vector256<sbyte>>());
 
-        //            // Change [a-z] to [A-Z], leaving all other bytes the same.
-        //            candidate ^= Vector.LessThanOrEqual(candidate - lowercaseA, lowercaseZ) & changeCaseMask;
+                do
+                {
+                    do
+                    {
+                        // Read a vector, change case, and write it back
+                        // Non-ASCII characters remain unmodified
 
-        //            Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(utf8Output), candidate);
+                        var original = Unsafe.ReadUnaligned<Vector256<sbyte>>(ref input);
 
-        //            utf8Input = utf8Input.Slice(Vector<byte>.Count);
-        //            bytesConsumed += Vector<byte>.Count;
+                        // toModifyMask = ~(endOfAlphaRange > original) & (original > startOfAlphaRange);
+                        // Each element of toModifyMask will be FFh or 00h.
 
-        //            utf8Output = utf8Output.Slice(Vector<byte>.Count);
-        //            bytesWritten += Vector<byte>.Count;
-        //        }
-        //    }
+                        var toModifyMask = Avx2.AndNot(
+                            Avx2.CompareGreaterThan(endOfAlphaRange, original),
+                            Avx2.CompareGreaterThan(original, startOfAlphaRange));
 
-        //    // Flush out the last of the ASCII data.
+                        var modified = Avx2.Xor(original, Avx2.And(toModifyMask, flipCaseMask));
+                        Unsafe.WriteUnaligned(ref output, modified);
 
-        //    while (!utf8Input.IsEmpty)
-        //    {
-        //        uint candidate = utf8Input[0];
-        //        if (!UnicodeHelpers.IsAsciiCodePoint(candidate))
-        //        {
-        //            goto HandleNonAsciiData; // non-ASCII data incoming
-        //        }
+                        // Were there any non-ASCII characters? If so, figure out which index
+                        // contained the non-ASCII character and return it now. We can use pmovmskb, lzcnt
+                        // to quickly calculate how many bytes were ASCII.
 
-        //        // We know we're going to write a single byte to the destination,
-        //        // so we can do a length check immediately.
+                        var mask = (uint)Avx2.MoveMask(original);
+                        if (mask != 0)
+                        {
+                            return ref Unsafe.Add(ref input, (int)Lzcnt.LeadingZeroCount(mask));
+                        }
 
-        //        if (utf8Output.IsEmpty)
-        //        {
-        //            return OperationStatus.DestinationTooSmall;
-        //        }
+                        // At this point, we know all characters were ASCII, so continue the loop.
 
-        //        // Change [a-z] to [A-Z], leaving all other bytes the same.
-        //        // TODO: Get JIT to implement this as lea, cmp, setbe, shl, xor
-        //        candidate ^= ((candidate - 'a') <= 'z') ? 0x20U : 0;
+                        input = ref Unsafe.Add(ref input, Unsafe.SizeOf<Vector256<sbyte>>());
+                        output = ref Unsafe.Add(ref output, Unsafe.SizeOf<Vector256<sbyte>>());
+                    } while (!Unsafe.IsAddressGreaterThan(ref input, ref lastAddrWhereCanReadVector));
 
-        //        utf8Output[0] = (byte)candidate;
+                    // At this point, we've not encountered any non-ASCII data. If the input buffer was an
+                    // exact multiple of the vector size, then there's no more data and we can return. If
+                    // there's any existing data in the input buffer, back up a bit so that we can perform
+                    // one final vector read and check.
 
-        //        utf8Input = utf8Input.Slice(1);
-        //        bytesConsumed++;
+                    if (!Unsafe.AreSame(ref input, ref Unsafe.Add(ref lastAddrWhereCanReadVector, Unsafe.SizeOf<Vector256<sbyte>>())))
+                    {
+                        output = ref Unsafe.AddByteOffset(ref output, Unsafe.ByteOffset(ref input, ref lastAddrWhereCanReadVector));
+                        input = ref lastAddrWhereCanReadVector;
+                        continue;
+                    }
+                } while (false);
+                return ref input;
+            }
+            else
+            {
+                // If this code path is hit, either vectorization is unavailable or the input buffer
+                // is smaller than the vector size.
 
-        //        utf8Output = utf8Output.Slice(1);
-        //        bytesWritten++;
-        //    }
+                // TODO: Generalized vectorization not dependent on AVX2.
+                // TODO: Poor man's vectorization.
 
-        //    Debug.Assert(utf8Input.IsEmpty, "Should've consumed entire input buffer.");
-        //    return OperationStatus.Done;
+                uint startOfAsciiRange = (toUpper) ? 'a' : 'A';
 
-        //    HandleNonAsciiData:
+                nuint i = 0;
+                for (; i < charCount; i++)
+                {
+                    uint thisChar = Unsafe.Add(ref input, i);
+                    if (thisChar >= 0x7F)
+                    {
+                        break; // non-ASCII data incoming
+                    }
 
-        //    Debug.Assert(!utf8Input.IsEmpty, "This code path isn't meant for empty input buffers.");
-        //    Debug.Assert(!UnicodeHelpers.IsAsciiCodePoint(utf8Input[0]), "Should've flushed all ASCII data.");
+                    // It's ok for the check above to have a branch since we expect it to very rarely
+                    // get taken, but the code below should be branchless since we expect case changes
+                    // to be a frequent but unpredictable occurrence.
 
-        //    // At this point, we know we're working with non-ASCII data, which means we need to
-        //    // transcode UTF-8 -> UTF-16, perform the globalization table lookup, then transcode
-        //    // back UTF-16 -> UTF-8.
+                    bool needsCaseChange = (thisChar - startOfAsciiRange) <= (uint)('z' - 'a');
+                    thisChar ^= (uint)(Unsafe.As<bool, byte>(ref needsCaseChange) << 5);
+                    Unsafe.Add(ref output, i) = (byte)thisChar;
+                }
 
-        //    // Bulk transcoding is faster than transcoding individual scalars, so let's try that first.
-
-        //    char[] rentedBuffer = ArrayPool<char>.Shared.Rent(Math.Min(utf8Input.Length, utf8Output.Length));
-        //    try
-        //    {
-        //        // Transcoding by definition cannot leave invalid sequences as-is, so we fudge things
-        //        // by telling the transcoder to fail in the face of invalid data, allowing us to copy
-        //        // invalid data from the input buffer to the output buffer manually. This only works
-        //        // because our transcoding routine is contracted to return the input buffer index where
-        //        // the first invalid sequence was seen, so this trick is not generalizable.
-
-        //        InvalidSequenceBehavior transcodeInvalidSequenceBehavior = invalidSequenceBehavior;
-        //        if (transcodeInvalidSequenceBehavior == InvalidSequenceBehavior.LeaveUnchanged)
-        //        {
-        //            transcodeInvalidSequenceBehavior = InvalidSequenceBehavior.Fail;
-        //        }
-
-        //        // Don't care about the OperationStatus since we're trying to go as far as possible
-
-        //        TranscodeToUtf16(
-        //            utf8Input: utf8Input,
-        //            utf16Output: rentedBuffer,
-        //            bytesConsumed: out int transcodeBytesConsumed,
-        //            charsWritten: out int transcodeCharsWritten,
-        //            isFinalBlock: isFinalBlock,
-        //            invalidSequenceBehavior: transcodeInvalidSequenceBehavior);
-
-        //        // Uppercase UTF-16 in-place. Per ftp://ftp.unicode.org/Public/UNIDATA/CaseFolding.txt
-        //        // and http://www.unicode.org/charts/case/, "simple" case folding (as performed by these
-        //        // invariant case conversion routines) will never change the length of a UTF-16 string.
-        //        // This also means we don't have to worry about individual code points crossing planes.
-        //        // The UTF-16 ToUpperInvariant routine is documented as supporting in-place conversion.
-
-        //        transcodeCharsWritten = new ReadOnlySpan<char>(rentedBuffer, 0, transcodeCharsWritten).ToUpperInvariant(rentedBuffer);
-
-        //        OperationStatus transcodeStatus = TranscodeFromUtf16(
-        //            utf16Input: rentedBuffer.AsSpan(0, transcodeCharsWritten),
-        //            utf8Output: utf8Output,
-        //            charsConsumed: out int transcodeCharsConsumed,
-        //            bytesWritten: out int transcodeBytesWritten,
-        //            isFinalBlock: true, // since can never end with an incomplete surrogate pair
-        //            invalidSequenceBehavior: InvalidSequenceBehavior.Fail); // since can never contain invalid data
-
-        //        Debug.Assert(transcodeStatus != OperationStatus.InvalidData, "Transcode buffer can never contain invalid data.");
-        //        Debug.Assert(transcodeStatus != OperationStatus.NeedMoreData, "Transcode buffer can never end with an incomplete surrogate pair.");
-
-        //    }
-        //    finally
-        //    {
-        //        ArrayPool<char>.Shared.Return(rentedBuffer);
-        //    }
-        //}
+                return ref Unsafe.Add(ref input, i);
+            }
+        }
     }
 }
