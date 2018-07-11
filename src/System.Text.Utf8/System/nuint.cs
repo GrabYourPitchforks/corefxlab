@@ -88,6 +88,19 @@ namespace System
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static nuint operator /(nuint value, uint divisor)
+        {
+            if (IntPtr.Size >= 8)
+            {
+                return new nuint((void*)((ulong)value._value / divisor));
+            }
+            else
+            {
+                return new nuint((void*)((uint)value._value / divisor));
+            }
+        }
+
         public int CompareTo(nuint other)
         {
             if (IntPtr.Size >= 8)
