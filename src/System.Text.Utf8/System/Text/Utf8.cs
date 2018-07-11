@@ -5,8 +5,6 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Globalization;
-using System.Numerics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace System.Text
@@ -27,7 +25,7 @@ namespace System.Text
                 case StringComparison.CurrentCulture:
                     return GetHashCode(utf8Input, CultureInfo.CurrentCulture, ignoreCase: false);
                 case StringComparison.CurrentCultureIgnoreCase:
-                    return GetHashCode(utf8Input, CultureInfo.InvariantCulture, ignoreCase: true);
+                    return GetHashCode(utf8Input, CultureInfo.CurrentCulture, ignoreCase: true);
                 case StringComparison.InvariantCulture:
                     return GetHashCode(utf8Input, CultureInfo.InvariantCulture, ignoreCase: false);
                 case StringComparison.InvariantCultureIgnoreCase:
@@ -50,58 +48,48 @@ namespace System.Text
 
             StreamingMarvin marvin = StreamingMarvin.CreateForUtf8();
 
-            // First try the common case of all-ASCII input data, which can be optimized
-            // through vectorization.
-
-            if (Vector.IsHardwareAccelerated)
-            {
-                if (utf8Input.Length >= Vector<byte>.Count)
-                {
-                    Vector<byte> asciiMask = new Vector<byte>(0x80);
-                    Vector<byte> lowercaseA = new Vector<byte>((byte)'a');
-                    Vector<byte> lowercaseZ = new Vector<byte>((byte)'z');
-                    Vector<byte> changeCaseMask = new Vector<byte>(0x20);
-
-                    do
-                    {
-                        // TODO: Remove unsafe code below when necessary Vector APIs come online
-
-                        var candidate = Unsafe.ReadUnaligned<Vector<byte>>(ref MemoryMarshal.GetReference(utf8Input));
-                        if ((candidate & asciiMask) != Vector<byte>.Zero)
-                        {
-                            break; // non-ASCII data incoming
-                        }
-
-                        // Change [a-z] to [A-Z], leaving all other bytes the same.
-                        candidate ^= Vector.LessThanOrEqual(candidate - lowercaseA, lowercaseZ) & changeCaseMask;
-                        marvin.Consume(candidate);
-                        utf8Input = utf8Input.Slice(Vector<byte>.Count);
-                    } while (utf8Input.Length >= Vector<byte>.Count);
-                }
-
-                // Emit a sentinel value indicating that we're switching from vectorized to non-vectorized
-                // operation. This is helpful because it allows us to distinguish [ 58 58 ] (a valid 2-byte UTF-8
-                // sequence) from [ E5 A1 98 ] (a valid 3-byte UTF-8 sequence which represents the UTF-16
-                // sequence [ 5858 ]). See the comments in the main loop below for why it's important to
-                // distinguish between these two scenarios.
-
-                marvin.Consume(0xFF00FF00U);
-            }
+            // First, try converting as many ASCII bytes as we can without involving transcoding.
 
             if (!utf8Input.IsEmpty)
             {
-                // The remainder is implemented by transcoding UTF-8 -> UTF-16.
+                byte[] rentedBytes = null;
+                Span<byte> tempBuffer = (utf8Input.Length > ArbitraryStackLimit)
+                    ? (rentedBytes = ArrayPool<byte>.Shared.Rent(utf8Input.Length))
+                    : stackalloc byte[ArbitraryStackLimit];
+
+                int numBytesCopied = ChangeCaseAscii(utf8Input, rentedBytes, toUpper: true);
+                marvin.Consume(rentedBytes.AsSpan(0, numBytesCopied));
+                utf8Input = utf8Input.Slice(numBytesCopied);
+
+                if (rentedBytes != null)
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBytes);
+                }
+            }
+
+            // If there are any non-ASCII bytes remaining, process them now.
+            // This involves a transcoding (UTF-8 -> UTF-16) step.
+
+            if (!utf8Input.IsEmpty)
+            {
+                // Emit a sentinel value indicating that we're switching from UTF-8 to UTF-16 operation.
+                // This is helpful because it allows us to distinguish [ 58 58 ] (a valid 2-byte UTF-8
+                // sequence) from [ E5 A1 98 ] (a valid 3-byte UTF-8 sequence which represents the UTF-16
+                // sequence [ 5858 ]), avoiding trivial hash code collisions.
+
+                marvin.Consume<uint>(0x00FF00FF);
 
                 Span<char> utf16Buffer = stackalloc char[ArbitraryStackLimit];
 
                 do
                 {
-                    // We cannot pass InvalidSequenceBehavior.LeaveUnchanged to the transcoder because
-                    // we are by definition changing the representation of the underlying data. Instead
-                    // we fudge things by telling the transcoder to fail in the face of invalid data,
-                    // allowing us to copy invalid data from the input buffer to the output buffer manually.
-                    // This only works because our transcoding routine is contracted to return the input
-                    // buffer index where the first invalid sequence was seen, so this trick is not generalizable.
+                    // Normally the transcoding process will fix up invalid sequences, replacing them with U+FFFD.
+                    // We don't want this behavior because it leads to trivial hash collisions in the input domain,
+                    // where lots of input strings which differ only in a single invalid byte sequence won't compare
+                    // as equal but will result in the same hash code. We work around this by identifying invalid
+                    // UTF-8 sequences and converting them to invalid UTF-16 sequences (which transcoding would normally
+                    // never produce on its own). This allows us to propagate invalid input in a loose sense and
+                    // ensure that unique invalid UTF-8 byte sequences contribute to the final hash output.
 
                     OperationStatus operationStatus = TranscodeToUtf16(
                         utf8Input: utf8Input,
@@ -116,6 +104,12 @@ namespace System.Text
                     // invariant case conversion routines) will never change the length of a UTF-16 string.
                     // This also means we don't have to worry about individual code points crossing planes.
                     // The UTF-16 ToUpperInvariant routine is documented as supporting in-place conversion.
+                    //
+                    // Normally retrieving a hash code from a string involves having the entire string available
+                    // as a single block, as the German Eszett (one Unicode scalar value) needs to compare as
+                    // equivalent to the two-scalar string "ss". The OrdinalIgnoreCase comparison is special
+                    // since it treats each scalar as completely standalone, so we can process the uppercase
+                    // conversion in isolated chunks. Culture-sensitive conversions cannot use this same trick.
 
                     var uppercaseSlice = utf16Buffer.Slice(0, ((ReadOnlySpan<char>)utf16Buffer).ToUpperInvariant(utf16Buffer));
                     marvin.Consume(MemoryMarshal.AsBytes(uppercaseSlice));
@@ -125,32 +119,31 @@ namespace System.Text
 
                     if (operationStatus == OperationStatus.InvalidData)
                     {
+                        // Our transcoder's contract is that in the event of failure, 'bytesConsumed' contains
+                        // the index of the first byte of the first invalid UTF-8 sequence. We can leverage this
+                        // to easily inspect and manipulate the invalid sequence. Not every OperationStatus-returning
+                        // method has this same contract so this trick isn't generalizable.
+
                         var result = UnicodeReader.PeekFirstScalarUtf8(utf8Input);
                         Debug.Assert(result.status == SequenceValidity.InvalidSequence, "InvalidData should be accompanied by an invalid sequence.");
-
-                        // Copy invalid bytes as-is to the hash routine, then continue. The reason we do this
-                        // is that we don't ever want two distinct invalid UTF-8 strings to compare as equal,
-                        // which means that we also want their hash codes to be distinct, ensured by mixing
-                        // the invalid bytes directly into the hash code. A naive hash code implementation
-                        // where invalid sequences are replaced with U+FFFD could lead to a bunch of inequal
-                        // strings all having the same hash code, which could subject the application to a
-                        // denial of service attack.
-
-                        // We also need a way to distinguish invalid UTF-8 bytes from valid UTF-16 code units,
-                        // otherwise the underlying hash code can't tell the difference between [ D8 D8 DF DF ]
-                        // (which is invalid UTF-8) and [ F1 86 8F 9F ] (which is U+463DF, whose UTF-16 representation
-                        // is [ D8D8 DFDF ]), which allows trivial collisions. We can address this by using
-                        // [ DD DD ] as a sentinel to indicate that the next several bytes are bad UTF-8, not
-                        // good UTF-16. Since [ DD DD ] can never appear unless immediately after a high surrogate,
-                        // this effectively disambiguates the two cases. We'll also include the length of the invalid
-                        // sequence as an additional discriminator to help differentiate between [ F3 80 80 ] (an
-                        // 3-byte invalid UTF-8 sequence) and [ F3 E8 82 80 ] (a 1-byte invalid UTF-8 sequence followed
-                        // by a 3-byte valid UTF-8 sequence corresponding to UTF-16 [ 8080 ]).
-
                         Debug.Assert(result.charsConsumed >= 1 && result.charsConsumed <= 3, "Expected 1 - 3 bytes consumed.");
 
-                        marvin.Consume((uint)(result.charsConsumed + 0xDDDD0000));
-                        marvin.Consume(utf8Input.Slice(0, result.charsConsumed));
+                        for (int i = 0; i < result.charsConsumed; i++)
+                        {
+                            // Invalid UTF-8 sequences are converted to the invalid UTF-16 sequence [ DD## ].
+                            // This is an isolated low surrogate code point, which is always invalid UTF-16,
+                            // so it's distinct from all other transcoder output.
+                            //
+                            // We prefer to consume these invalid UTF-16 sequences rather than writing the
+                            // invalid UTF-8 sequence directly, as invalid UTF-8 sequences can look like valid
+                            // UTF-16 sequences. Consider [ D8 D8 DF DF ] (invalid UTF-8) and [ F1 86 8F 9F ]
+                            // (valid UTF-8 whose UTF-16 representation is [ D8D8 DFDF ]). This demonstrates
+                            // how writing the invalid UTF-8 sequences directly can lead to trivial hash code
+                            // collisions.
+
+                            marvin.Consume((ushort)(utf8Input[i] + 0xDD00));
+                        }
+
                         utf8Input = utf8Input.Slice(result.charsConsumed);
                     }
                 } while (!utf8Input.IsEmpty);
